@@ -53,7 +53,7 @@ async def ask_openrouter(image_b64: str, user_hint: str) -> str:
         "Content-Type": "application/json",
     }
     payload = {
-        "model": "meta-llama/llama-3.2-11b-vision-instruct:free",
+        "model": "google/gemini-2.0-flash-exp:free",
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {
