@@ -55,7 +55,9 @@ async def ask_yandex(image_b64: str) -> str:
             }
         ],
         "max_tokens": 800,
+        "reasoning_effort": "none",
         "temperature": 0.3,
+        
     }
     async with httpx.AsyncClient(timeout=60) as client:
         r = await client.post(
