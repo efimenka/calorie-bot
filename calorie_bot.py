@@ -1,5 +1,8 @@
 """
 Telegram Calorie Counter Bot - Yandex AI Studio (Qwen3.6-35B VLM)
+- Подсчёт калорий и БЖУ нарастающим итогом
+- Предупреждения о глютене, лактозе и сахаре
+- Уведомления о воде, витаминах и рекомендации ужина
 """
 
 import os
@@ -33,37 +36,19 @@ logger = logging.getLogger(__name__)
 
 user_data: dict = {}
 
-PROMPT_PHOTO = """Ты опытный диетолог. Посмотри на фото еды и ответь строго в таком формате (без лишнего текста):
+PROMPT_PHOTO = """Ты диетолог с экспертизой в пищевых непереносимостях. Посмотри на фото еды и ответь строго в таком формате (без лишнего текста):
+
 🍽 Блюдо: [название]
 📏 Порция: [вес]
 🔥 Калории: [только число ккал]
 💪 Белки: [только число г] | 🧈 Жиры: [только число г] | 🌾 Углеводы: [только число г]
+⚠️ Глютен: [ДА/НЕТ/ВОЗМОЖНО]
+⚠️ Лактоза: [ДА/НЕТ/ВОЗМОЖНО]
+⚠️ Сахар: [ДА/НЕТ/ВОЗМОЖНО]
 💡 Совет: [короткий совет]
+
 Если на фото не еда — напиши только: НЕ ЕДА
 Отвечай только по-русски."""
-
-
-async def ask_yandex_text(prompt: str) -> str:
-    headers = {
-        "Authorization": f"Api-Key {YANDEX_API_KEY}",
-        "Content-Type": "application/json",
-        "x-folder-id": YANDEX_FOLDER_ID,
-    }
-    payload = {
-        "model": f"gpt://{YANDEX_FOLDER_ID}/{MODEL}",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": 600,
-        "temperature": 0.7,
-        "reasoning_effort": "none",
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        r = await client.post(
-            "https://ai.api.cloud.yandex.net/v1/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
 
 
 async def ask_yandex_vision(image_b64: str) -> str:
@@ -85,6 +70,29 @@ async def ask_yandex_vision(image_b64: str) -> str:
         ],
         "max_tokens": 800,
         "temperature": 0.3,
+        "reasoning_effort": "none",
+    }
+    async with httpx.AsyncClient(timeout=60) as client:
+        r = await client.post(
+            "https://ai.api.cloud.yandex.net/v1/chat/completions",
+            headers=headers,
+            json=payload,
+        )
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"]
+
+
+async def ask_yandex_text(prompt: str) -> str:
+    headers = {
+        "Authorization": f"Api-Key {YANDEX_API_KEY}",
+        "Content-Type": "application/json",
+        "x-folder-id": YANDEX_FOLDER_ID,
+    }
+    payload = {
+        "model": f"gpt://{YANDEX_FOLDER_ID}/{MODEL}",
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 600,
+        "temperature": 0.7,
         "reasoning_effort": "none",
     }
     async with httpx.AsyncClient(timeout=60) as client:
@@ -131,6 +139,25 @@ def parse_nutrition(text: str):
     return kcal, protein, fat, carbs
 
 
+def parse_allergens(text: str) -> list[str]:
+    """Возвращает список предупреждений об аллергенах."""
+    warnings = []
+    checks = [
+        ("Глютен", "🌾 ГЛЮТЕН"),
+        ("Лактоза", "🥛 ЛАКТОЗА"),
+        ("Сахар", "🍬 САХАР"),
+    ]
+    for key, label in checks:
+        m = re.search(rf"{key}:\s*(ДА|НЕТ|ВОЗМОЖНО)", text, re.IGNORECASE)
+        if m:
+            val = m.group(1).upper()
+            if val == "ДА":
+                warnings.append(f"🚫 {label}: СОДЕРЖИТСЯ")
+            elif val == "ВОЗМОЖНО":
+                warnings.append(f"⚠️ {label}: ВОЗМОЖНО СОДЕРЖИТСЯ")
+    return warnings
+
+
 # ── Хэндлеры ─────────────────────────────────────────────────────────────────
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -138,7 +165,8 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.bot_data.setdefault("subscribers", set()).add(user_id)
     await update.message.reply_text(
         "👋 Привет! Я считаю калории и БЖУ по фото.\n\n"
-        "📸 Отправь фото блюда — получи КБЖУ и остаток из 1400 ккал.\n\n"
+        "📸 Отправь фото блюда — получи КБЖУ, остаток калорий и предупреждения о:\n"
+        "🌾 Глютене | 🥛 Лактозе | 🍬 Сахаре\n\n"
         "🔔 Уведомления:\n"
         "• 💧 Вода — каждые 2 часа (8:00–22:00 МСК)\n"
         "• 💊 Витамины — в 9:00 МСК\n"
@@ -170,8 +198,7 @@ async def cmd_reset(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "📸 Отправь фото еды → получи калории и КБЖУ.\n"
-        "Можешь написать вес в подписи к фото.\n\n"
+        "📸 Отправь фото еды → получи калории, КБЖУ и предупреждения о глютене, лактозе и сахаре.\n\n"
         "/stats — статистика за сегодня\n"
         "/reset — сбросить счётчик\n"
         "⚠️ Оценка приблизительная ±20%."
@@ -196,12 +223,25 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
             return
 
         kcal, protein, fat, carbs = parse_nutrition(answer)
+        allergen_warnings = parse_allergens(answer)
+
+        # Убираем строки с аллергенами из основного ответа
+        clean_answer = re.sub(r"⚠️\s*(Глютен|Лактоза|Сахар):.*\n?", "", answer).strip()
+
         if kcal > 0:
             d = add_nutrition(user_id, kcal, protein, fat, carbs)
             left = CALORIE_LIMIT - d["calories"]
             status = f"✅ Осталось: {left} ккал" if left > 0 else f"⚠️ Превышение на {abs(left)} ккал!"
+
+            allergen_block = ""
+            if allergen_warnings:
+                allergen_block = "\n\n🚨 *Внимание — аллергены:*\n" + "\n".join(allergen_warnings)
+            else:
+                allergen_block = "\n\n✅ *Глютен, лактоза и сахар не обнаружены*"
+
             await msg.reply_text(
-                f"{answer}\n\n"
+                f"{clean_answer}"
+                f"{allergen_block}\n\n"
                 f"━━━━━━━━━━━━━━━\n"
                 f"📊 *Итого за день:*\n"
                 f"🔥 {d['calories']}/{CALORIE_LIMIT} ккал — {status}\n"
@@ -237,7 +277,6 @@ async def notify_vitamins_morning(context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.warning("Vitamin notify failed for %s: %s", user_id, e)
 
 async def notify_dinner(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """В 17:00 МСК — рекомендации ужина на основе остатка калорий."""
     for user_id in context.bot_data.get("subscribers", set()):
         try:
             d = get_user_data(user_id)
@@ -248,7 +287,7 @@ async def notify_dinner(context: ContextTypes.DEFAULT_TYPE) -> None:
                     user_id,
                     f"🍽 *Время ужина!*\n\n"
                     f"⚠️ Ты уже превысила дневной лимит на {abs(left)} ккал.\n"
-                    f"Рекомендую на ужин только лёгкий салат или стакан кефира (до 100 ккал).",
+                    f"Рекомендую лёгкий салат или стакан воды (без глютена, лактозы и сахара).",
                     parse_mode="Markdown"
                 )
                 continue
@@ -257,15 +296,17 @@ async def notify_dinner(context: ContextTypes.DEFAULT_TYPE) -> None:
 На ужин осталось примерно {left} ккал.
 Белки за день: {d['protein']:.0f} г, Жиры: {d['fat']:.0f} г, Углеводы: {d['carbs']:.0f} г.
 
+ВАЖНО: блюда должны быть БЕЗ глютена, БЕЗ лактозы и БЕЗ добавленного сахара.
+
 Предложи ровно 3 варианта ужина которые вписываются в остаток калорий.
 Формат ответа (строго):
-🍽 Вариант 1: [название блюда] — ~[ккал] ккал
+🍽 Вариант 1: [название] — ~[ккал] ккал
 [краткое описание 1 строка]
 
-🍽 Вариант 2: [название блюда] — ~[ккал] ккал
+🍽 Вариант 2: [название] — ~[ккал] ккал
 [краткое описание 1 строка]
 
-🍽 Вариант 3: [название блюда] — ~[ккал] ккал
+🍽 Вариант 3: [название] — ~[ккал] ккал
 [краткое описание 1 строка]
 
 Отвечай только по-русски, без лишних слов."""
@@ -275,8 +316,9 @@ async def notify_dinner(context: ContextTypes.DEFAULT_TYPE) -> None:
                 user_id,
                 f"🌆 *Время ужина!*\n\n"
                 f"📊 За день съедено: {d['calories']}/{CALORIE_LIMIT} ккал\n"
-                f"✅ Осталось: {left} ккал\n\n"
-                f"Вот 3 варианта ужина для тебя:\n\n{suggestions}",
+                f"✅ Осталось: {left} ккал\n"
+                f"_(все варианты без глютена, лактозы и сахара)_\n\n"
+                f"{suggestions}",
                 parse_mode="Markdown"
             )
         except Exception as e:
