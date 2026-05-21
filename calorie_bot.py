@@ -1,13 +1,12 @@
 """
-Telegram Calorie Counter Bot
-Использует Yandex AI (YandexGPT Vision) для распознавания еды и подсчёта калорий.
+Telegram Calorie Counter Bot - Yandex AI Vision (VLM)
 """
-
+ 
 import os
 import base64
 import logging
 from io import BytesIO
-
+ 
 import httpx
 from telegram import Update
 from telegram.ext import (
@@ -17,64 +16,46 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-
-# ── Настройки ────────────────────────────────────────────────────────────────
+ 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY", "")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID", "")
-
-logging.basicConfig(
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    level=logging.INFO,
-)
+ 
+logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """Ты — опытный диетолог и нутрициолог.
-Пользователь присылает фото блюда или продукта. Твоя задача:
-1. Определить, что изображено на фото.
-2. Оценить размер порции визуально.
-3. Рассчитать примерное количество калорий (ккал).
-4. Указать КБЖУ: калории, белки, жиры, углеводы.
-5. Дать короткий совет по питанию (1-2 предложения).
-
-Отвечай по-русски, структурированно. Если на фото нет еды — скажи об этом.
-
-Формат ответа:
+ 
+PROMPT = """Ты опытный диетолог. Посмотри на фото еды и ответь:
 🍽 Блюдо: [название]
-📏 Порция: [примерный вес/объём]
+📏 Порция: [вес]
 🔥 Калории: [ккал]
 💪 Белки: [г] | 🧈 Жиры: [г] | 🌾 Углеводы: [г]
-💡 Совет: [совет]"""
-
-
-async def ask_yandex(image_b64: str, user_hint: str) -> str:
-    """Отправляет фото в Yandex AI Vision и возвращает ответ."""
+💡 Совет: [короткий совет]
+Если на фото не еда — скажи об этом."""
+ 
+ 
+async def ask_yandex(image_b64: str) -> str:
     headers = {
         "Authorization": f"Api-Key {YANDEX_API_KEY}",
         "Content-Type": "application/json",
-        "x-folder-id": YANDEX_FOLDER_ID,
     }
     payload = {
-        "modelUri": f"gpt://{ YANDEX_FOLDER_ID}/yandexgpt/latest",
+        "modelUri": f"gpt://{YANDEX_FOLDER_ID}/yandexgpt-vision-lite/latest",
         "completionOptions": {
             "stream": False,
             "temperature": 0.3,
-            "maxTokens": 800,
+            "maxTokens": "800",
         },
         "messages": [
-            {"role": "system", "text": SYSTEM_PROMPT},
             {
                 "role": "user",
                 "content": [
                     {
                         "type": "image_url",
-                        "image_url": {
-                            "url": f"data:image/jpeg;base64,{image_b64}"
-                        },
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
                     },
-                    {"type": "text", "text": user_hint},
+                    {"type": "text", "text": PROMPT},
                 ],
-            },
+            }
         ],
     }
     async with httpx.AsyncClient(timeout=60) as client:
@@ -83,67 +64,43 @@ async def ask_yandex(image_b64: str, user_hint: str) -> str:
             headers=headers,
             json=payload,
         )
+        logger.info("Yandex response: %s %s", r.status_code, r.text[:300])
         r.raise_for_status()
         data = r.json()
         return data["result"]["alternatives"][0]["message"]["text"]
-
-
-# ── Хэндлеры ─────────────────────────────────────────────────────────────────
-
+ 
+ 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "👋 Привет! Я считаю калории по фото.\n\n"
-        "📸 Просто отправь мне фото блюда или продукта, "
-        "и я определю калорийность и КБЖУ.\n\n"
-        "/help — подробная справка"
+        "👋 Привет! Я считаю калории по фото.\n📸 Отправь фото блюда — получи КБЖУ!\n/help — справка"
     )
-
-
+ 
 async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(
-        "ℹ️ Как пользоваться ботом:\n\n"
-        "1. Сфотографируй еду или продукт.\n"
-        "2. Отправь фото прямо в этот чат.\n"
-        "3. Получи оценку калорий и КБЖУ.\n\n"
-        "Советы для точного результата:\n"
-        "• Снимай при хорошем освещении\n"
-        "• Старайся, чтобы блюдо было в кадре целиком\n"
-        "• Можешь написать вес в подписи к фото\n\n"
-        "⚠️ Оценка калорий приблизительная — ±20%."
+        "📸 Отправь фото еды → получи калории и КБЖУ.\n"
+        "Можешь написать вес в подписи к фото для точности.\n"
+        "⚠️ Оценка приблизительная ±20%."
     )
-
-
+ 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     msg = update.message
-    thinking = await msg.reply_text("🔍 Анализирую фото, подожди секунду…")
-
+    thinking = await msg.reply_text("🔍 Анализирую фото…")
     try:
         photo = msg.photo[-1]
         file = await context.bot.get_file(photo.file_id)
-
         buf = BytesIO()
         await file.download_to_memory(buf)
         image_b64 = base64.standard_b64encode(buf.getvalue()).decode()
-
-        user_hint = msg.caption or "Определи блюдо и посчитай калории."
-        answer = await ask_yandex(image_b64, user_hint)
-
+        answer = await ask_yandex(image_b64)
         await thinking.delete()
         await msg.reply_text(answer)
-
     except Exception as e:
         logger.error("Error: %s", e)
-        await thinking.edit_text("❌ Что-то пошло не так. Попробуй снова.")
-
-
+        await thinking.edit_text(f"❌ Ошибка: {str(e)[:100]}")
+ 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        "📸 Отправь мне фото блюда, и я посчитаю калории!"
-    )
-
-
-# ── Запуск ───────────────────────────────────────────────────────────────────
-
+    await update.message.reply_text("📸 Отправь фото блюда!")
+ 
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
@@ -152,7 +109,6 @@ def main() -> None:
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     logger.info("Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-
+ 
 if __name__ == "__main__":
     main()
