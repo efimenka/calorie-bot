@@ -28,7 +28,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 YANDEX_API_KEY = os.environ.get("YANDEX_API_KEY", "")
 YANDEX_FOLDER_ID = os.environ.get("YANDEX_FOLDER_ID", "")
 MODEL = "qwen3.6-35b-a3b/latest"
-CALORIE_LIMIT = 1400
+CALORIE_LIMIT = 1300
 MSK = pytz.timezone("Europe/Moscow")
 
 logging.basicConfig(format="%(asctime)s [%(levelname)s] %(message)s", level=logging.INFO)
