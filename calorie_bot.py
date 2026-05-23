@@ -572,6 +572,23 @@ async def notify_dinner(context: ContextTypes.DEFAULT_TYPE) -> None:
 
 # ── Запуск ───────────────────────────────────────────────────────────────────
 
+async def notify_fridge(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """В 20:00 спрашивает что есть в холодильнике."""
+    for user_id in context.bot_data.get("subscribers", set()):
+        try:
+            context.bot_data.setdefault("fridge_mode", set()).add(user_id)
+            await context.bot.send_message(
+                user_id,
+                "🧊 *Что есть в холодильнике?*\n\n"
+                "Напиши список продуктов — составлю меню на завтра на 1400 ккал "
+                "без глютена, лактозы и сахара, с учётом нормы белка!\n\n"
+                "Пример: _курица, яйца, огурцы, помидоры, рис, оливковое масло_",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning("Fridge notify failed for %s: %s", user_id, e)
+
+
 def main() -> None:
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
