@@ -352,6 +352,35 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     user_id = update.effective_user.id
     context.bot_data.setdefault("subscribers", set()).add(user_id)
     text = msg.text.strip()
+
+    # Режим холодильника — если пользователь в режиме ввода продуктов
+    fridge_mode = context.bot_data.get("fridge_mode", set())
+    if user_id in fridge_mode:
+        fridge_mode.discard(user_id)
+        thinking = await msg.reply_text("🧑‍🍳 Составляю меню на завтра…")
+        try:
+            d = get_user_data(user_id)
+            menu = await make_menu_from_fridge(text, current_protein=d.get("protein", 0.0))
+            await thinking.delete()
+            await msg.reply_text(
+                f"🧊 *Твои продукты:* {text}\n\n{menu}",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.error("Fridge menu error: %s", e)
+            await thinking.edit_text(f"❌ Ошибка: {str(e)[:200]}")
+        return
+
+    # Команда для ручного вызова режима холодильника
+    if any(w in text.lower() for w in ["холодильник", "меню на завтра", "что приготовить", "рецепты"]):
+        context.bot_data.setdefault("fridge_mode", set()).add(user_id)
+        await msg.reply_text(
+            "🧊 Напиши что есть в холодильнике — составлю меню на день!\n\n"
+            "Пример: _курица, яйца, огурцы, помидоры, рис_",
+            parse_mode="Markdown"
+        )
+        return
+
     thinking = await msg.reply_text("🔍 Считаю калории…")
     try:
         prompt = f"""Ты диетолог. Пользователь написал что съел: "{text}"
@@ -417,6 +446,69 @@ async def notify_vitamins_check(context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as e:
             logger.warning("Vitamin check failed for %s: %s", user_id, e)
 
+async def cmd_fridge(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    user_id = update.effective_user.id
+    context.bot_data.setdefault("fridge_mode", set()).add(user_id)
+    await update.message.reply_text(
+        "🧊 Напиши что есть в холодильнике — составлю меню на день!\n\n"
+        "Пример: _курица, яйца, огурцы, помидоры, рис, оливковое масло_",
+        parse_mode="Markdown"
+    )
+
+
+    """В 20:00 спрашивает что есть в холодильнике."""
+    for user_id in context.bot_data.get("subscribers", set()):
+        try:
+            context.bot_data.setdefault("fridge_mode", set()).add(user_id)
+            await context.bot.send_message(
+                user_id,
+                "🧊 *Что есть в холодильнике?*\n\n"
+                "Напиши список продуктов, и я составлю меню на завтра на 1400 ккал "
+                "без глютена, лактозы и сахара — и скажу что докупить!\n\n"
+                "Пример: _курица, яйца, огурцы, помидоры, рис, оливковое масло_",
+                parse_mode="Markdown"
+            )
+        except Exception as e:
+            logger.warning("Fridge notify failed for %s: %s", user_id, e)
+
+
+async def make_menu_from_fridge(products: str, current_protein: float = 0.0) -> str:
+    protein_note = (
+        f"Уже съедено белка: {current_protein:.0f} г. Нужно добрать ещё ~{max(0, PROTEIN_MIN - current_protein):.0f} г."
+        if current_protein > 0
+        else f"Норма белка на день: {PROTEIN_MIN:.0f}–{PROTEIN_RECOMMENDED:.0f} г."
+    )
+    prompt = f"""Ты диетолог и повар. Составь меню на один день (1400 ккал) для женщины 37 лет.
+
+Доступные продукты: {products}
+
+Требования:
+- Без глютена, без лактозы, без добавленного сахара
+- 3 приёма пищи: завтрак, обед, ужин (без перекуса)
+- Итого ~1400 ккал
+- {protein_note} Распредели белок равномерно по приёмам пищи.
+- Для каждого приёма пищи указывай калории И белок
+
+Формат ответа:
+
+🌅 *Завтрак* (~[ккал] ккал | белок ~[г] г)
+[блюдо и краткий рецепт 2-3 строки]
+
+☀️ *Обед* (~[ккал] ккал | белок ~[г] г)
+[блюдо и краткий рецепт 2-3 строки]
+
+🌙 *Ужин* (~[ккал] ккал | белок ~[г] г)
+[блюдо и краткий рецепт 2-3 строки]
+
+📊 *Итого:* ~1400 ккал | Белки: ~[г] г | Жиры: ~[г] г | Углеводы: ~[г] г
+
+🛒 *Что докупить:*
+[список продуктов которых не хватает, или "Всё есть!"]
+
+Отвечай только по-русски."""
+    return await ask_yandex_text(prompt)
+
+
 async def notify_dinner(context: ContextTypes.DEFAULT_TYPE) -> None:
     for user_id in context.bot_data.get("subscribers", set()):
         try:
@@ -436,22 +528,32 @@ async def notify_dinner(context: ContextTypes.DEFAULT_TYPE) -> None:
                 )
                 continue
 
-            prompt = f"""Ты диетолог. Пользователь съел {d['calories']} ккал из {CALORIE_LIMIT}.
-На ужин осталось {left} ккал. Белки: {d['protein']:.0f} г, Жиры: {d['fat']:.0f} г, Углеводы: {d['carbs']:.0f} г.
-ВАЖНО: блюда БЕЗ глютена, БЕЗ лактозы и БЕЗ добавленного сахара.
-Предложи 3 варианта ужина. Формат:
-🍽 Вариант 1: [название] — ~[ккал] ккал
-[описание]
+            protein_eaten = d['protein']
+            protein_left = max(0, PROTEIN_MIN - protein_eaten)
+            protein_note = protein_status(protein_eaten)
 
-🍽 Вариант 2: [название] — ~[ккал] ккал
-[описание]
+            prompt = f"""Ты диетолог. Пользователь съел за день:
+- Калории: {d['calories']} из {CALORIE_LIMIT} ккал (осталось {left} ккал)
+- Белки: {protein_eaten:.0f} г (норма {PROTEIN_MIN:.0f}–{PROTEIN_RECOMMENDED:.0f} г, {'МАЛО — нужно добавить ~' + str(int(protein_left)) + ' г' if protein_left > 0 else 'норма выполнена'})
+- Жиры: {d['fat']:.0f} г
+- Углеводы: {d['carbs']:.0f} г
 
-🍽 Вариант 3: [название] — ~[ккал] ккал
-[описание]
+Предложи 3 варианта ужина которые:
+1. Вписываются в оставшиеся {left} ккал
+2. {'Содержат максимум белка (нужно добрать ~' + str(int(protein_left)) + ' г)' if protein_left > 0 else 'Сбалансированы по БЖУ'}
+3. БЕЗ глютена, БЕЗ лактозы, БЕЗ добавленного сахара
+
+Для каждого варианта укажи калории И белок.
+Формат:
+🍽 Вариант 1: [название] — ~[ккал] ккал | белок ~[г] г
+[описание 1 строка]
+
+🍽 Вариант 2: [название] — ~[ккал] ккал | белок ~[г] г
+[описание 1 строка]
+
+🍽 Вариант 3: [название] — ~[ккал] ккал | белок ~[г] г
+[описание 1 строка]
 Только по-русски."""
-
-            suggestions = await ask_yandex_text(prompt)
-            protein_note = protein_status(d["protein"])
             await context.bot.send_message(
                 user_id,
                 f"🌆 *Время ужина!*\n\n"
@@ -478,6 +580,7 @@ def main() -> None:
     app.add_handler(CommandHandler("stats", cmd_stats))
     app.add_handler(CommandHandler("vitamins", cmd_vitamins))
     app.add_handler(CommandHandler("reset", cmd_reset))
+    app.add_handler(CommandHandler("fridge", cmd_fridge))
     app.add_handler(CallbackQueryHandler(handle_vitamin_callback, pattern="^vitamins_"))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -494,6 +597,9 @@ def main() -> None:
 
     # Ужин в 17:00
     jq.run_daily(notify_dinner, time=time(17, 0, tzinfo=MSK))
+
+    # Холодильник в 20:00
+    jq.run_daily(notify_fridge, time=time(20, 0, tzinfo=MSK))
 
     logger.info("Бот запущен!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
